@@ -5,7 +5,7 @@
 #include <driver/i2s.h>
 #include <arduinoFFT.h>
 
-double currentBands[8] = {0};
+extern double currentBands[8];
 double currentZCR = 0;
 
 double vReal[FFT_SAMPLES];

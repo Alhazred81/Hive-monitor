@@ -1,63 +1,107 @@
-#include "sensors.h"
-#include "config.h"
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_BMP280.h>
-#include <Adafruit_MPU6050.h>
+#include "sensors.h"
+
+float currentTemp = 0.0f;
+float currentHum = 0.0f;
+float currentPres = 0.0f;
+double currentBands[8] = {0};
+volatile bool motionDetected = false;
+volatile bool isScanning = false;
+
+SensorState gAht20;
+SensorState gBmp280;
+SensorState gSgp41;
+SensorState gInmp441_1;
+SensorState gInmp441_2;
+SensorState gSht40;
 
 Adafruit_AHTX0 aht;
 Adafruit_BMP280 bmp;
-Adafruit_MPU6050 mpu;
 
-float currentTemp = 0.0;
-float currentHum = 0.0;
-float currentPres = 0.0;
-volatile bool motionDetected = false;
+void recoverI2CBus() {
+    pinMode(SDA, INPUT_PULLUP);
+    pinMode(SCL, INPUT_PULLUP);
+    delay(20);
 
-void IRAM_ATTR handleMotionInterrupt() {
-    motionDetected = true;
+    if (digitalRead(SDA) == LOW) {
+        pinMode(SCL, OUTPUT);
+        for (int i = 0; i < 9; i++) {
+            digitalWrite(SCL, LOW);
+            delayMicroseconds(5);
+            digitalWrite(SCL, HIGH);
+            delayMicroseconds(5);
+        }
+    }
+    pinMode(SCL, INPUT_PULLUP);
 }
 
 void initSensors() {
-    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    recoverI2CBus();
+    Wire.begin();
 
-    if (!aht.begin()) {
-        Serial.println(F("AHT20 hiba"));
-    }
-    
-    if (!bmp.begin(0x76) && !bmp.begin(0x77)) {
-        Serial.println(F("BMP280 hiba"));
-    }
-
-    if (mpu.begin()) {
-        mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
-        mpu.setMotionDetectionThreshold(5);
-        mpu.setMotionDetectionDuration(5);
-        mpu.setInterruptPinLatch(true);
-        mpu.setInterruptPinPolarity(true);
-        mpu.setMotionInterrupt(true);
-
-        pinMode(MPU_INT_PIN, INPUT_PULLDOWN);
-        attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), handleMotionInterrupt, RISING);
+    if (aht.begin()) {
+        gAht20.enabled = true;
     } else {
-        Serial.println(F("MPU6050 hiba"));
+        gAht20.enabled = false;
     }
+
+    // BMP280 alapértelmezett címe 0x76 vagy 0x77
+    if (bmp.begin(0x76) || bmp.begin(0x77)) {
+        gBmp280.enabled = true;
+    } else {
+        gBmp280.enabled = false;
+    }
+
+    gSgp41.enabled = false;   // Jelenleg nincs rákötve
+    gInmp441_1.enabled = true; // 1 db mikrofon aktív
+    gInmp441_2.enabled = false;
+    gSht40.enabled = false;   // Jelenleg nincs rákötve
 }
 
 void updateSensors() {
-    sensors_event_t humidity, temp_aht;
-    aht.getEvent(&humidity, &temp_aht);
-    currentTemp = temp_aht.temperature;
-    currentHum = humidity.relative_humidity;
-    currentPres = bmp.readPressure() / 100.0F;
+    if (isScanning) return;
+
+    // AHT20 olvasás
+    sensors_event_t humidity, temp;
+    if (aht.getEvent(&humidity, &temp)) {
+        currentTemp = temp.temperature;
+        currentHum = humidity.relative_humidity;
+        gAht20.lastReadOk = true;
+        gAht20.value = String(currentTemp, 1) + " °C / " + String(currentHum, 1) + " %";
+    } else {
+        gAht20.lastReadOk = false;
+        gAht20.value = "Hiba / Nincs jel";
+    }
+
+    // BMP280 olvasás
+    float press = bmp.readPressure();
+    if (!isnan(press)) {
+        currentPres = press / 100.0F; // Pa -> hPa
+        gBmp280.lastReadOk = true;
+        gBmp280.value = String(currentPres, 1) + " hPa";
+    } else {
+        gBmp280.lastReadOk = false;
+        gBmp280.value = "Hiba / Nincs jel";
+    }
+
+    // Alapértelmezett státuszok a nem csatlakoztatott eszközökhöz
+    gSgp41.lastReadOk = false;
+    gSgp41.value = "Nincs bekötve";
+
+    gSht40.lastReadOk = false;
+    gSht40.value = "Nincs bekötve";
+
+    gInmp441_1.lastReadOk = true;
+    gInmp441_1.value = "Aktív (I2S)";
+
+    gInmp441_2.lastReadOk = false;
+    gInmp441_2.value = "Nincs konfigurálva";
 }
 
+
 bool checkMpuSeverity() {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    
-    if (abs(a.acceleration.x) > 3.0 || abs(a.acceleration.y) > 3.0 || abs(a.acceleration.z - 9.8) > 3.0) {
-        return true; 
-    }
-    return false; 
+    return true;
 }

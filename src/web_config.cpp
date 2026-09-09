@@ -7,9 +7,16 @@
 extern Preferences prefs;
 extern String fullMac;
 
-void handleConfigPage(AsyncWebServerRequest *request) {
-    String html = htmlHead("Beállítások", "2");
+void handleConnections(AsyncWebServerRequest *request) {
+    String html = htmlHead("Kapcsolatok", "2");
     
+    String currentConnectedSsid = WiFi.SSID();
+    if (currentConnectedSsid.length() == 0) {
+        prefs.begin("wifi_cfg", true);
+        currentConnectedSsid = prefs.getString("sta_ssid", "");
+        prefs.end();
+    }
+
     html += R"rawliteral(
     <div class="card">
         <h3>Rádió üzemmód</h3>
@@ -24,11 +31,13 @@ void handleConfigPage(AsyncWebServerRequest *request) {
         <h3>Helyi Wi-Fi (Teszteléshez)</h3>
         <label>Hálózat neve (SSID):</label>
         <div class="flex-row">
-            <select id="staSsid">
-                <option value="">Kattints a kereséshez...</option>
+            <select id="staSsidSelect" onchange="document.getElementById('staSsid').value=this.value;" style="margin-bottom:6px;">
+                <option value="">Válassz a fenti keresőből vagy írd be alább...</option>
             </select>
             <button onclick="scanWifi()">Keresés</button>
         </div>
+        <input type="text" id="staSsid" value=")rawliteral" + currentConnectedSsid + R"rawliteral(" onfocus="if(this.value=='" + currentConnectedSsid + "')this.value='';" placeholder="Router SSID">
+        
         <label>Jelszó:</label>
         <input type="password" id="staPass" placeholder="Jelszó">
         <button onclick="saveStaConfig()">Csatlakozás beállítása</button>
@@ -45,26 +54,26 @@ void handleConfigPage(AsyncWebServerRequest *request) {
 
     <script>
     function scanWifi() {
-        let select = document.getElementById('staSsid');
+        let select = document.getElementById('staSsidSelect');
         select.innerHTML = '<option value="">Keresés folyamatban...</option>';
         fetch('/api/scan_wifi')
         .then(response => response.json())
         .then(data => {
-            select.innerHTML = '';
-            if(data.length === 0) { select.innerHTML = '<option value="">Nem található hálózat</option>'; return; }
+            select.innerHTML = '<option value="">Talált hálózatok (kattints a kiválasztáshoz)</option>';
+            if(data.length === 0) { return; }
             data.forEach(net => {
                 let opt = document.createElement('option');
                 opt.value = net.ssid;
                 opt.textContent = net.ssid + ' (' + net.rssi + ' dBm)';
                 select.appendChild(opt);
             });
-        }).catch(err => { select.innerHTML = '<option value="">Hiba a kereséskor</option>'; });
+        }).catch(err => { console.error(err); });
     }
 
     function saveStaConfig() {
         let ssid = document.getElementById('staSsid').value;
         let pass = document.getElementById('staPass').value;
-        if (!ssid) { alert('Kérlek, válassz egy hálózatot!'); return; }
+        if (!ssid) { alert('Kérlek, add meg a hálózat nevét!'); return; }
         fetch('/api/save_sta', {
             method: 'POST',
             headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -95,6 +104,10 @@ void handleConfigPage(AsyncWebServerRequest *request) {
 
     html += htmlFoot();
     request->send(200, "text/html", html);
+}
+
+void handleConfigPage(AsyncWebServerRequest *request) {
+    handleConnections(request);
 }
 
 void handleApiApInfo(AsyncWebServerRequest *request) {
@@ -157,3 +170,4 @@ void handleApiScanWifi(AsyncWebServerRequest *request) {
     WiFi.scanDelete();
     request->send(200, "application/json", json);
 }
+

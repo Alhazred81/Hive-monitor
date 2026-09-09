@@ -1,5 +1,5 @@
-//web_main.h
-
 #pragma once
+#include <ESPAsyncWebServer.h>
 
-void initWebMain();
+void handleRoot(AsyncWebServerRequest *request);
+void handleApiTelemetry(AsyncWebServerRequest *request);
