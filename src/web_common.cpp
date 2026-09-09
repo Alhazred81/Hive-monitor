@@ -1,69 +1,72 @@
 #include "web_common.h"
-#include "config.h"
 #include <WiFi.h>
-#include <DNSServer.h>
-#include "web_main.h"
-#include "web_sensors.h"
-#include <Preferences.h>
+#include "config.h"
+#include "web_ui.h"
 
 AsyncWebServer server(80);
 DNSServer dnsServer;
 Preferences prefs;
-
-String currentSSID;
-String currentPass;
 String fullMac;
 
 void initWeb() {
-    WiFi.mode(WIFI_AP);
+    WiFi.mode(WIFI_AP_STA);
+    Serial.println("[WEB] WiFi mód beállítva: WIFI_AP_STA");
     
+    prefs.begin("wifi_cfg", false); 
+    String staSsid = prefs.getString("sta_ssid", "");
+    String staPass = prefs.getString("sta_pass", "");
+
     fullMac = WiFi.macAddress();
     String macClean = fullMac;
     macClean.replace(":", "");
     String defaultSSID = "Monitor_" + macClean.substring(macClean.length() - 4);
-
-    // Itt kell 'false'-ra cserélni a 'true'-t
-    prefs.begin("wifi_cfg", false); 
-    currentSSID = prefs.getString("ap_ssid", defaultSSID);
-    currentPass = prefs.getString("ap_pass", DEFAULT_AP_PASS);
+    String currentSSID = prefs.getString("ap_ssid", defaultSSID);
+    String currentPass = prefs.getString("ap_pass", DEFAULT_AP_PASS);
     prefs.end();
-    
-    WiFi.softAP(currentSSID.c_str(), currentPass.c_str());
-    dnsServer.start(DNS_PORT_NUM, "*", WiFi.softAPIP());
 
-    initWebMain();
-    initWebSensors();
-
-    // Új végpont az AP adatok lekéréséhez
-    server.on("/api/ap_info", HTTP_GET, [](AsyncWebServerRequest *request){
-        String json = "{\"mac\":\"" + fullMac + "\",\"ssid\":\"" + currentSSID + "\"}";
-        request->send(200, "application/json", json);
-    });
-
-    // Új végpont a beállítások mentéséhez
-    server.on("/api/save_ap", HTTP_POST, [](AsyncWebServerRequest *request){
-        if (request->hasParam("ssid", true) && request->hasParam("pass", true)) {
-            String newSsid = request->getParam("ssid", true)->value();
-            String newPass = request->getParam("pass", true)->value();
-            
-            prefs.begin("wifi_cfg", false); // false = írás/olvasás
-            prefs.putString("ap_ssid", newSsid);
-            prefs.putString("ap_pass", newPass);
-            prefs.end();
-            
-            request->send(200, "text/plain", "OK");
-            delay(1000);
-            ESP.restart();
+    if (staSsid.length() > 0) {
+        Serial.printf("[WEB] Csatlakozás teszt hálózathoz: %s\n", staSsid.c_str());
+        WiFi.begin(staSsid.c_str(), staPass.c_str());
+        
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            Serial.print(".");
+            attempts++;
+        }
+        Serial.println();
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.print("[WEB] Kliens IP cím: ");
+            Serial.println(WiFi.localIP());
         } else {
-            request->send(400, "text/plain", "Hiba");
+            Serial.println("[WEB] Időtúllépés, nem sikerült felcsatlakozni a Wi-Fi-re.");
+        }
+    }
+
+    if (WiFi.softAP(currentSSID.c_str(), currentPass.c_str())) {
+        Serial.printf("[WEB] AP sikeresen elindult. SSID: %s\n", currentSSID.c_str());
+    } else {
+        Serial.println("[WEB] Hiba: Az AP indítása sikertelen.");
+    }
+
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
+        if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+            Serial.println("[WEB-DIAG] Új kliens csatlakozott az AP-hoz.");
+        } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+            Serial.println("[WEB-DIAG] Kliens levált az AP-ról.");
         }
     });
 
-    server.onNotFound([](AsyncWebServerRequest *request){
-        request->redirect("http://192.168.4.1/");
-    });
+    if (dnsServer.start(DNS_PORT_NUM, "*", WiFi.softAPIP())) {
+        Serial.println("[WEB] DNS szerver (Captive Portal) elindítva.");
+    }
 
+    // A végpontok regisztrálása a web_ui-n keresztül történik
+    initWebUI();
+    
     server.begin();
+    Serial.println("[WEB] Webszerver elindítva a 80-as porton.");
 }
 
 void loopWeb() {
