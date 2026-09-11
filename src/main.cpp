@@ -3,6 +3,7 @@
 
 #include "analyzer.h"
 #include "config.h"
+#include "connections.h"
 #include "sensors.h"
 #include "server_comm.h"
 #include "spec_ana.h"
@@ -16,7 +17,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // Az I²C buszt minden induláskor fixen inicializáljuk a konfigurált pinekkel
+    // Az I²C buszt minden induláskor fixen inicializáljuk
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     
     initSensors();
@@ -25,17 +26,20 @@ void setup() {
     initSpecAna();
     initStorage();
     initDiagRoutes();
+    handleConnections();
 
-     initWeb();
-     initServerComm();
+    // 1. Kommunikáció inicializálása és ESP-NOW szinkronizálás
+    initServerComm();
 
     if (!serverFound) {
         Serial.println("Szerver keresése ESP-NOW csatornákon...");
-        // Non-blocking vagy ütemezett keresés javasolt, de ideiglenesen ne akassza ki a rendszert
         scanAndSyncServer();
     } else {
         Serial.println("Szerver megtalálva a mentett adatok alapján.");
     }
+
+    // 2. A webszerver (és az AP/STA mód) elindítása CSAK a szkennelés UTÁN!
+    initWeb();
 
     #ifndef CONFIG_IDF_TARGET_ESP32C3
         esp_sleep_enable_ext0_wakeup((gpio_num_t)WAKE_PIN, 1);
@@ -47,6 +51,7 @@ void loop() {
     updateSpecAna();
     updateAnalyzer();
     loopWeb();
+    handleClientTick();
 
     static unsigned long lastUpdate = 0;
     if (millis() - lastUpdate >= 10000) {

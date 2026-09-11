@@ -1,105 +1,151 @@
-//web_comm.cpp
-
 #include "server_comm.h"
-#include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <sys/time.h>
 
-Preferences commPrefs;
 bool serverFound = false;
 uint8_t serverMac[6] = {0};
-uint8_t currentChannel = 1;
-String deviceMacStr = "";
+uint8_t serverChannel = 1;
 
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-    if (len >= sizeof(uint32_t)) {
-        uint32_t serverTime;
-        memcpy(&serverTime, incomingData, sizeof(uint32_t));
+// Rádió mód tárolása
+String currentRadioMode = "espnow"; 
+
+// Időszinkronizáció változói
+volatile unsigned long lastSyncTimeMillis = 0;
+volatile bool timeSynchronized = false;
+
+Preferences serverPrefs;
+volatile bool gPairingSuccess = false;
+
+#pragma pack(push, 1)
+struct PairingData {
+    uint32_t magic;         // 0x42454553 ("BEES")
+    uint8_t  msgType;       // 0x01
+    uint8_t  serverMac[6];
+    char     ssid[32];
+    char     password[32];
+    uint32_t unixTime;
+};
+#pragma pack(pop)
+
+// ESP-NOW vétel callback a kaptármonitoron
+void onReceive(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
+    if (data_len == sizeof(PairingData)) {
+        PairingData* packet = (PairingData*)data;
         
-        memcpy(serverMac, mac, 6);
-        serverFound = true;
+        // Ellenőrizzük a varázsszót és a típus azonosítót
+        if (packet->magic == 0x42454553 && packet->msgType == 0x01) {
+            uint8_t primaryChan;
+            wifi_second_chan_t secondChan;
+            esp_wifi_get_channel(&primaryChan, &secondChan);
+            
+            // Adatok mentése a flash memóriába
+            serverPrefs.begin("kaptar", false);
+            serverPrefs.putBytes("srvMac", packet->serverMac, 6);
+            serverPrefs.putUInt("channel", primaryChan);
+            serverPrefs.putString("ssid", packet->ssid);
+            serverPrefs.putString("pass", packet->password);
+            serverPrefs.end();
+            
+            memcpy(serverMac, packet->serverMac, 6);
+            serverChannel = primaryChan;
+            gPairingSuccess = true;
+
+            // Belső óra beállítása a szerverről kapott idő alapján
+            if (packet->unixTime > 1000000000) { // Alapvető validálás (2001 utáni idő)
+                struct timeval tv;
+                tv.tv_sec = packet->unixTime;
+                tv.tv_usec = 0;
+                settimeofday(&tv, NULL);
+                lastSyncTimeMillis = millis();
+                timeSynchronized = true;
+            }
+        }
     }
 }
 
 void initServerComm() {
-    WiFi.mode(WIFI_AP_STA);
-    deviceMacStr = WiFi.macAddress();
-
-    if (esp_now_init() != ESP_OK) {
-        return;
+    serverPrefs.begin("kaptar", true);
+    
+    // Rádió mód kiolvasása (alapértelmezett: "espnow")
+    currentRadioMode = serverPrefs.getString("radio", "espnow");
+    
+    if (serverPrefs.getBytesLength("srvMac") == 6) {
+        serverPrefs.getBytes("srvMac", serverMac, 6);
+        serverChannel = serverPrefs.getUInt("channel", 1);
+        serverFound = true;
+    } else {
+        serverFound = false;
     }
-    esp_now_register_recv_cb(onDataRecv);
-
-    commPrefs.begin("espnow_cfg", true);
-    bool hasSaved = commPrefs.getBytes("server_mac", serverMac, 6) == 6;
-    currentChannel = commPrefs.getUChar("channel", 1);
-    commPrefs.end();
-
-    if (hasSaved) {
-        esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
-        esp_now_peer_info_t peerInfo = {};
-        memcpy(peerInfo.peer_addr, serverMac, 6);
-        peerInfo.channel = currentChannel;
-        peerInfo.encrypt = false;
-        esp_now_add_peer(&peerInfo);
-        serverFound = true; 
-    }
+    serverPrefs.end();
 }
 
 void scanAndSyncServer() {
-    if (serverFound) return;
-
-    esp_now_peer_info_t broadcastPeer = {};
-    memset(broadcastPeer.peer_addr, 0xFF, 6);
-    broadcastPeer.channel = 0;
-    broadcastPeer.encrypt = false;
-    esp_now_add_peer(&broadcastPeer);
-
-    while (!serverFound && currentChannel <= 13) {
-        esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
-        
-        uint8_t pingMsg[] = "jollerihijohoko";
-        esp_now_send(broadcastPeer.peer_addr, pingMsg, sizeof(pingMsg));
-        
-        delay(150); 
-        if (!serverFound) {
-            currentChannel++;
-        }
-    }
-
-    if (serverFound) {
-        commPrefs.begin("espnow_cfg", false);
-        commPrefs.putBytes("server_mac", serverMac, 6);
-        commPrefs.putUChar("channel", currentChannel);
-        commPrefs.end();
+    gPairingSuccess = false;
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW inicializálási hiba!");
+        return;
     }
     
-    esp_now_del_peer(broadcastPeer.peer_addr);
+    esp_now_register_recv_cb(onReceive);
+    
+    const int HOPPING_DELAY_MS = 250; // 250 ms csatornánként
+    
+    for (int ch = 1; ch <= 13; ch++) {
+        if (gPairingSuccess) {
+            break; 
+        }
+        
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_promiscuous(false);
+        
+        unsigned long startWait = millis();
+        while (millis() - startWait < HOPPING_DELAY_MS) {
+            if (gPairingSuccess) {
+                break;
+            }
+            delay(10);
+            yield(); // Létfontosságú a WDT miatt!
+        }
+    }
+    
+    esp_now_deinit();
+    
+    if (gPairingSuccess) {
+        serverFound = true;
+        Serial.println("\n[SYNC] Párosítás sikeres! Adatok és idő mentve.");
+    } else {
+        serverFound = false;
+        Serial.println("\n[SYNC] Nem talált szervert a 13 csatornán.");
+    }
 }
 
-bool sendTelemetryJson(float temp, float hum, float pres, float zcr, uint8_t state, const double* bands) {
-    if (!serverFound) return false;
+void sendTelemetryJson(float temp, float hum, float pres, float zcr, uint8_t state, double bands[8]) {
+    if (!serverFound) return;
 
-    // ArduinoJson v7 ajánlott JsonDocument szintaxisa
+    // JsonDocument az ArduinoJson 7-hez
     JsonDocument doc;
-    doc["id"] = deviceMacStr;
-    doc["t"] = millis();
-    doc["tp"] = temp;
-    doc["hm"] = hum;
-    doc["st"] = state;
-    doc["zc"] = zcr;
-
-    JsonArray bArray = doc["b"].to<JsonArray>();
-    for(int i = 0; i < 8; i++) {
-        bArray.add((int)bands[i]);
+    doc["temp"] = temp;
+    doc["hum"] = hum;
+    doc["pres"] = pres;
+    doc["zcr"] = zcr;
+    doc["state"] = state;
+    
+    JsonArray bandsArray = doc["bands"].to<JsonArray>();
+    for (int i = 0; i < 8; i++) {
+        bandsArray.add(bands[i]);
     }
 
-    char buffer[250];
-    size_t n = serializeJson(doc, buffer);
-
-    esp_err_t result = esp_now_send(serverMac, (uint8_t*)buffer, n);
-    return (result == ESP_OK);
+    String output;
+    serializeJson(doc, output);
+    
+    // Itt történik a tényleges küldés (később implementálandó a választott protokoll szerint)
 }

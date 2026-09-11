@@ -10,19 +10,25 @@ extern String fullMac;
 void handleConnections(AsyncWebServerRequest *request) {
     String html = htmlHead("Kapcsolatok", "2");
     
+    // --- Adatok kiolvasása a memóriából ---
+    prefs.begin("wifi_cfg", true);
     String currentConnectedSsid = WiFi.SSID();
     if (currentConnectedSsid.length() == 0) {
-        prefs.begin("wifi_cfg", true);
         currentConnectedSsid = prefs.getString("sta_ssid", "");
-        prefs.end();
     }
+    String currentRadioMode = prefs.getString("radio_mode", "espnow");
+    prefs.end();
+
+    // Dinamikus HTML attribútumok a legördülő menühöz
+    String espnowSelected = (currentRadioMode == "espnow" || currentRadioMode != "lora") ? "selected" : "";
+    String loraSelected = (currentRadioMode == "lora") ? "selected" : "";
 
     html += R"rawliteral(
     <div class="card">
         <h3>Rádió üzemmód</h3>
         <select id="radioSelect">
-            <option value="lora">868 MHz (LoRa)</option>
-            <option value="wifi">2.4 GHz (WiFi / ESP-NOW)</option>
+            <option value="espnow" )rawliteral" + espnowSelected + R"rawliteral(>ESP-NOW (Alapértelmezett)</option>
+            <option value="lora" )rawliteral" + loraSelected + R"rawliteral(>868 MHz (LoRa)</option>
         </select>
         <button onclick="saveRadioMode()">Mentés és Újraindítás</button>
     </div>
@@ -53,6 +59,26 @@ void handleConnections(AsyncWebServerRequest *request) {
     </div>
 
     <script>
+    // --- VÉDELEM: LoRa Hans-üzem figyelmeztetés ---
+    document.addEventListener('DOMContentLoaded', function() {
+        let radioSelect = document.getElementById('radioSelect');
+        if (radioSelect) {
+            radioSelect.addEventListener('change', function(e) {
+                if (e.target.value === 'lora') {
+                    const confirmed = confirm(
+                        "FIGYELEM!\n\n" +
+                        "Mielőtt átváltasz LoRa módba, feltétlenül ellenőrizd, hogy a megfelelő antenna csatlakoztatva van-e a modulhoz!\n\n" +
+                        "Ha antenna nélkül indítod el az adást, a rádiómodul Hans-üzembe kerülhet (a végfok véglegesen leéghet).\n\n" +
+                        "Biztosan átváltasz LoRa-ra?"
+                    );
+                    if (!confirmed) {
+                        e.target.value = 'espnow';
+                    }
+                }
+            });
+        }
+    });
+
     function scanWifi() {
         let select = document.getElementById('staSsidSelect');
         select.innerHTML = '<option value="">Keresés folyamatban...</option>';
@@ -170,4 +196,3 @@ void handleApiScanWifi(AsyncWebServerRequest *request) {
     WiFi.scanDelete();
     request->send(200, "application/json", json);
 }
-
